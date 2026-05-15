@@ -11,6 +11,42 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 
+def _coerce_bool(value: Any, *, field_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "":
+            return default
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{field_name} must be a boolean")
+
+
+def _coerce_float(value: Any, *, field_name: str, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+
+
+def _coerce_int(value: Any, *, field_name: str, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+
+
 class ActionMode(str, Enum):
     SYNC = "sync"
     ASYNC = "async"
@@ -26,9 +62,21 @@ class ActionBudget:
     def from_mapping(cls, value: Optional[Dict[str, Any]]) -> "ActionBudget":
         data = value if isinstance(value, dict) else {}
         return cls(
-            timeout_seconds=float(data.get("timeout_seconds", 60)),
-            max_llm_calls=int(data.get("max_llm_calls", 0)),
-            max_items=int(data.get("max_items", 10)),
+            timeout_seconds=_coerce_float(
+                data.get("timeout_seconds"),
+                field_name="budget.timeout_seconds",
+                default=60,
+            ),
+            max_llm_calls=_coerce_int(
+                data.get("max_llm_calls"),
+                field_name="budget.max_llm_calls",
+                default=0,
+            ),
+            max_items=_coerce_int(
+                data.get("max_items"),
+                field_name="budget.max_items",
+                default=10,
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -61,11 +109,14 @@ class ActionContext:
             trace_id=str(data.get("trace_id") or f"trace_{uuid.uuid4().hex}"),
             session_id=data.get("session_id"),
             idempotency_key=data.get("idempotency_key"),
-            dry_run=bool(data.get("dry_run", False)),
+            dry_run=_coerce_bool(data.get("dry_run"), field_name="dry_run"),
             budget=ActionBudget.from_mapping(data.get("budget")),
             context=dict(data.get("context") or {}),
-            requires_confirmation=bool(data.get("requires_confirmation", False)),
-            call_depth=int(data.get("call_depth", 0)),
+            requires_confirmation=_coerce_bool(
+                data.get("requires_confirmation"),
+                field_name="requires_confirmation",
+            ),
+            call_depth=_coerce_int(data.get("call_depth"), field_name="call_depth", default=0),
         )
 
     def to_dict(self) -> Dict[str, Any]:

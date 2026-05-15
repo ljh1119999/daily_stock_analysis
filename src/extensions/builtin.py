@@ -41,7 +41,9 @@ def _handle_notification_send(payload: Dict[str, Any], context: ActionContext) -
 
 
 def _handle_stock_pool_import(payload: Dict[str, Any], context: ActionContext) -> Dict[str, Any]:
-    items = payload.get("items") or []
+    if "items" not in payload or payload.get("items") is None:
+        raise ValueError("items is required")
+    items = payload.get("items")
     if not isinstance(items, list):
         raise ValueError("items must be a list")
     return {**_pending("adapter_pending", dry_run=context.dry_run), "items_count": len(items)}

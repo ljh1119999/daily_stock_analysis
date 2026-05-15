@@ -13,6 +13,7 @@ from src.extensions.actions import ActionDefinition
 class PluginStatus(str, Enum):
     NOT_INSTALLED = "not_installed"
     DISABLED = "disabled"
+    UNAVAILABLE = "unavailable"
     AVAILABLE = "available"
     ENABLED = "enabled"
     DEGRADED = "degraded"

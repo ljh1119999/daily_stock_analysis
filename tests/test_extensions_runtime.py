@@ -14,10 +14,10 @@ from src.extensions import (
     ActionMode,
     ExtensionRegistry,
     ExtensionRuntime,
-    create_builtin_extension_registry,
     create_builtin_extension_runtime,
 )
 from src.extensions.permissions import ActionPermissionGuard
+from src.extensions.registry import PluginDefinition, PluginStatus
 from src.extensions.tasks import ActionTaskRunner
 from src.services.task_queue import AnalysisTaskQueue, TaskStatus
 
@@ -38,10 +38,16 @@ class StubTaskRunner:
 class ExtensionRuntimeTestCase(unittest.TestCase):
     def _runtime(self, action=None, *, guard=None, task_runner=None):
         registry = ExtensionRegistry()
-        registry.register_action(
-            action
-            or ActionDefinition("test.echo", "test", "Echo payload", _echo, timeout_seconds=1)
+        action = action or ActionDefinition("test.echo", "test", "Echo payload", _echo, timeout_seconds=1)
+        registry.register_plugin(
+            PluginDefinition(
+                action.plugin_id,
+                action.plugin_id,
+                "Test plugin",
+                status=PluginStatus.ENABLED,
+            )
         )
+        registry.register_action(action)
         return ExtensionRuntime(registry=registry, permission_guard=guard, task_runner=task_runner)
 
     def test_action_context_contract_fields(self):
@@ -67,11 +73,15 @@ class ExtensionRuntimeTestCase(unittest.TestCase):
         self.assertEqual(context["context"], {"market": "cn"})
         self.assertTrue(context["requires_confirmation"])
 
+        parsed = ActionContext.from_mapping({"dry_run": "false", "requires_confirmation": "0"}).to_dict()
+        self.assertFalse(parsed["dry_run"])
+        self.assertFalse(parsed["requires_confirmation"])
+
     def test_execute_sync_action_success_and_hashes_input(self):
         result = self._runtime().execute_action(
             "test.echo",
             {"symbol": "600519"},
-            {"caller": "web", "dry_run": True},
+            {"caller": "web"},
             async_mode=False,
         )
 
@@ -122,7 +132,7 @@ class ExtensionRuntimeTestCase(unittest.TestCase):
         self.assertEqual(result.task_id, "task_123")
         self.assertEqual(task_runner.calls[0], {"action_id": "test.async_echo", "payload": {"symbol": "600519"}, "caller": "agent"})
 
-    def test_async_builtin_action_failure_marks_queue_task_failed(self):
+    def test_async_action_failure_marks_queue_task_failed(self):
         class SyncExecutor:
             def submit(self, func, *args):
                 future = Future()
@@ -137,12 +147,23 @@ class ExtensionRuntimeTestCase(unittest.TestCase):
         try:
             queue = AnalysisTaskQueue(max_workers=1)
             queue._executor = SyncExecutor()
-            runtime = ExtensionRuntime(
-                registry=create_builtin_extension_registry(),
+
+            def bad(payload, context):
+                raise RuntimeError("secret token should not be returned")
+
+            runtime = self._runtime(
+                ActionDefinition(
+                    "test.async_bad",
+                    "test",
+                    "Async bad",
+                    bad,
+                    mode=ActionMode.ASYNC,
+                    subject_key="symbol",
+                ),
                 task_runner=ActionTaskRunner(queue_factory=lambda: queue),
             )
 
-            accepted = runtime.execute_action("dsa.analyze_stock", {}, {"caller": "agent"})
+            accepted = runtime.execute_action("test.async_bad", {"symbol": "600519"}, {"caller": "agent"})
             task = queue.get_task(accepted.task_id)
 
             self.assertTrue(accepted.ok)
@@ -153,6 +174,96 @@ class ExtensionRuntimeTestCase(unittest.TestCase):
         finally:
             AnalysisTaskQueue._instance = original_instance
 
+    def test_disabled_plugin_action_is_rejected(self):
+        registry = ExtensionRegistry()
+        registry.register_action(ActionDefinition("test.disabled", "test", "Disabled", _echo))
+        result = ExtensionRuntime(registry=registry).execute_action("test.disabled")
+
+        self.assertEqual(PluginStatus.UNAVAILABLE.value, "unavailable")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "plugin_not_enabled")
+        self.assertEqual(result.error.details["plugin_status"], "disabled")
+
+    def test_invalid_context_and_required_input_fail_before_execution(self):
+        invalid_context = self._runtime().execute_action(
+            "test.echo",
+            context={"budget": {"timeout_seconds": "abc"}},
+        )
+
+        task_runner = StubTaskRunner()
+        runtime = self._runtime(
+            ActionDefinition(
+                "test.async_required",
+                "test",
+                "Async required",
+                _echo,
+                input_schema={"type": "object", "required": ["symbol"]},
+                mode=ActionMode.ASYNC,
+            ),
+            task_runner=task_runner,
+        )
+        invalid_input = runtime.execute_action("test.async_required", {}, {"caller": "agent"})
+
+        self.assertEqual(invalid_context.error.code, "invalid_context")
+        self.assertEqual(invalid_input.error.code, "invalid_input")
+        self.assertEqual(invalid_input.error.details["missing_fields"], ["symbol"])
+        self.assertEqual(task_runner.calls, [])
+
+    def test_dry_run_validates_without_invoking_handler(self):
+        calls = []
+
+        def side_effecting(payload, context):
+            calls.append(payload)
+            return {"called": True}
+
+        action = ActionDefinition(
+            "test.confirmed",
+            "test",
+            "Confirmed",
+            side_effecting,
+            input_schema={"type": "object", "required": ["symbol"]},
+            requires_confirmation=True,
+        )
+        result = self._runtime(action).execute_action(
+            "test.confirmed",
+            {"symbol": "600519"},
+            {"dry_run": "true"},
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data, {"status": "validated", "dry_run": True})
+        self.assertEqual(calls, [])
+
+    def test_async_submission_failure_returns_structured_error(self):
+        class FailingTaskRunner:
+            def submit(self, **kwargs):
+                raise RuntimeError("executor shutdown")
+
+        runtime = self._runtime(
+            ActionDefinition("test.async_echo", "test", "Async echo", _echo, mode=ActionMode.ASYNC),
+            task_runner=FailingTaskRunner(),
+        )
+        result = runtime.execute_action("test.async_echo", {"symbol": "600519"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "task_submission_failed")
+
+    def test_timeout_waits_for_handler_before_returning_failure(self):
+        events = []
+
+        def slow(payload, context):
+            events.append("started")
+            time.sleep(0.05)
+            events.append("done")
+            return {"done": True}
+
+        result = self._runtime(ActionDefinition("test.slow", "test", "Slow", slow, timeout_seconds=0.01)).execute_action(
+            "test.slow"
+        )
+
+        self.assertEqual(result.error.code, "timeout")
+        self.assertEqual(events, ["started", "done"])
+
     def test_builtin_runtime_registers_core_actions(self):
         runtime = create_builtin_extension_runtime()
         action_ids = {action.action_id for action in runtime.registry.list_actions()}
@@ -160,12 +271,29 @@ class ExtensionRuntimeTestCase(unittest.TestCase):
 
         dry_run = runtime.execute_action("notification.send", {"channel": "test"}, {"dry_run": True})
         blocked = runtime.execute_action("notification.send", {"channel": "test"})
+        blocked_string = runtime.execute_action(
+            "notification.send",
+            {"channel": "test"},
+            {"requires_confirmation": "false"},
+        )
         confirmed = runtime.execute_action("notification.send", {"channel": "test"}, {"requires_confirmation": True})
+        stock_pool_missing = runtime.execute_action("stock_pool.import", {}, {"requires_confirmation": True})
+        stock_pool_confirmed = runtime.execute_action(
+            "stock_pool.import",
+            {"items": []},
+            {"requires_confirmation": True},
+        )
 
         self.assertTrue(dry_run.ok)
         self.assertEqual(dry_run.data["status"], "validated")
         self.assertEqual(blocked.error.code, "confirmation_required")
+        self.assertEqual(blocked_string.error.code, "confirmation_required")
         self.assertTrue(confirmed.ok)
+        self.assertEqual(confirmed.degradation["code"], "adapter_not_bound")
+        self.assertNotIn("degradation", confirmed.data)
+        self.assertEqual(stock_pool_missing.error.code, "invalid_input")
+        self.assertTrue(stock_pool_confirmed.ok)
+        self.assertEqual(stock_pool_confirmed.degradation["code"], "adapter_not_bound")
 
 
 if __name__ == "__main__":

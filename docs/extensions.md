@@ -69,4 +69,4 @@ Evidence Store 后续至少记录 `run_id`、`action_id`、`input_hash`、`sourc
 
 AlphaSift 不作为 `data_provider` 行情源，也不是 DSA 子模块。后续应以 `candidate_discovery` Plugin/Action 接入：Plugin 提供 `alphasift.healthcheck`、`alphasift.list_strategies`、`alphasift.screen` 等真实能力；Skill 指导 Agent 何时使用；Web 机会发现页作为通用 Action 宿主。
 
-回滚方式：删除 `src/extensions/`、移除 TaskInfo 插件任务元数据、移除 Agent Tool Registry 的 Action 桥接 helper，并回滚本文档与 changelog 条目。
+回滚方式：删除 `src/extensions/`、移除 TaskInfo 插件任务元数据，并回滚本文档与 changelog 条目。
