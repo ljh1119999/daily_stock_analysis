@@ -178,8 +178,8 @@ To get started quickly, you need at minimum:
 
 ### 5. Done!
 
-Default schedule: Every weekday at **18:00 (Beijing Time)** is executed by the default workflow cron; when `SCHEDULE_TIME` is not configured in Actions, the trigger remains the workflow default.
-`SCHEDULE_TIME` currently only affects local built-in scheduling via `python main.py --schedule` and does not change GitHub Actions trigger timing. This change is documentation-only and does not constitute a runtime implementation. The Actions-time execution control requested in `#1497` is still pending and should continue to be tracked with `Refs #1497`, not treated as closed or delivered in this PR.
+Default schedule: Every weekday at **18:00 (Beijing Time)** is executed by the default workflow cron; when repository-level `SCHEDULE_TIME` is not set, the trigger remains the workflow default.
+`SCHEDULE_TIME` currently only affects local built-in scheduling via `python main.py --schedule` and does not change GitHub Actions trigger timing. This update is docs-only and does not constitute runtime implementation for issue #1497; Actions-time scheduling changes are still pending and should continue to be tracked with `Refs #1497`.
 
 ---
 
@@ -561,7 +561,7 @@ python main.py --workers 5            # Specify concurrency
 GitHub Actions parses `on.schedule.cron` before a job starts, so the cron expression cannot directly
 read Repository Variables, Secrets, or env values. As a result, the `SCHEDULE_TIME` repository
 variable only applies to the built-in local scheduler (`python main.py --schedule`); setting it alone
-does not change the default GitHub Actions trigger time and is not yet implemented in this default workflow. When
+does not change the default GitHub Actions trigger time (docs-only boundary clarification). This default workflow has not implemented this runtime control. When
 `SCHEDULE_TIME` is unset, GitHub Actions still executes at the fixed default cron (`0 10 * * 1-5`); to
 shift execution time, update `.github/workflows/00-daily-analysis.yml` cron manually.
 
