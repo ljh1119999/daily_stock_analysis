@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import sys
 import unittest
-from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -14,7 +12,7 @@ from fastapi import HTTPException
 try:
     import litellm  # noqa: F401
 except ModuleNotFoundError:
-    sys.modules["litellm"] = MagicMock()
+    litellm = MagicMock()
 
 from api.v1.endpoints import alphasift as alphasift_endpoint
 from src.config import Config
@@ -36,6 +34,19 @@ def _raise_alphasift_unavailable() -> None:
     raise _alphasift_unavailable()
 
 
+def _make_adapter_module(
+    *,
+    screen=None,
+    list_strategies=None,
+    get_status=None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        screen=screen or MagicMock(return_value=[]),
+        list_strategies=list_strategies or (lambda: [{"id": "dual_low", "title": "双低选股", "description": "", "tag": "价值"}]),
+        get_status=get_status or (lambda: {"supported_markets": ["cn"]}),
+    )
+
+
 class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         Config.reset_instance()
@@ -51,6 +62,9 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             alphasift_endpoint.AlphaSiftScreenRequest(**kwargs),
             config=config,
         )
+
+    def _strategies(self, config: Config):
+        return alphasift_endpoint.alphasift_strategies(config=config)
 
     def test_status_defaults_to_disabled(self) -> None:
         config = self._config(enabled=False)
@@ -126,7 +140,11 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
     def test_install_invokes_pip_when_enabled_and_missing(self) -> None:
         config = self._config(enabled=True)
-        fake_module = SimpleNamespace(screen=MagicMock())
+        fake_module = SimpleNamespace(
+            screen=MagicMock(),
+            list_strategies=MagicMock(return_value=[]),
+            get_status=MagicMock(return_value={"supported_markets": ["cn"]}),
+        )
         completed = SimpleNamespace(returncode=0, stdout="installed", stderr="")
 
         with (
@@ -154,7 +172,11 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
 
     def test_install_marks_custom_spec_as_non_default_without_exposing_spec(self) -> None:
         config = self._config(enabled=True, install_spec="git+https://example.com/private/alphasift.git")
-        fake_module = SimpleNamespace(screen=MagicMock())
+        fake_module = SimpleNamespace(
+            screen=MagicMock(),
+            list_strategies=MagicMock(return_value=[]),
+            get_status=MagicMock(return_value={"supported_markets": ["cn"]}),
+        )
         completed = SimpleNamespace(returncode=0, stdout="installed", stderr="")
 
         with (
@@ -180,10 +202,63 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
         run_mock.assert_called_once()
         self.assertIn(config.alphasift_install_spec, run_mock.call_args.args[0])
 
-    def test_screen_calls_alphasift_package_when_enabled(self) -> None:
+    def test_strategies_returns_adapter_strategies(self) -> None:
         config = self._config(enabled=True)
-        fake_module = SimpleNamespace(
-            screen=MagicMock(return_value=[{"code": "600519", "name": "Kweichow Moutai", "score": 88.5}])
+        fake_module = _make_adapter_module(
+            list_strategies=lambda: [
+                {"id": "dual_low", "title": "双低选股", "description": "value", "tag": "价值"},
+                {"id": "trend_quality", "title": "趋势质量", "description": "trend", "tag": "框架"},
+            ],
+            get_status=lambda: {"supported_markets": ["cn"]},
+        )
+
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            payload = self._strategies(config=config)
+
+        self.assertEqual(
+            payload,
+            {
+                "strategies": [
+                    {
+                        "id": "dual_low",
+                        "title": "双低选股",
+                        "description": "value",
+                        "tag": "价值",
+                        "market": "",
+                    },
+                    {
+                        "id": "trend_quality",
+                        "title": "趋势质量",
+                        "description": "trend",
+                        "tag": "框架",
+                        "market": "",
+                    },
+                ]
+            },
+        )
+
+    def test_screen_calls_dsa_adapter_and_normalizes_nan(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            screen=MagicMock(
+                return_value={
+                    "picks": [
+                        {
+                            "code": "600519",
+                            "name": "Kweichow Moutai",
+                            "score": float("nan"),
+                            "ranking_reason": "AlphaSift pick",
+                            "nested": {
+                                "pe": float("inf"),
+                                "pb": float("-inf"),
+                                "eps": 20.5,
+                            },
+                        },
+                    ]
+                }
+            ),
+            list_strategies=lambda: [{"id": "dual_low", "title": "双低选股"}],
+            get_status=lambda: {"supported_markets": ["cn"]},
         )
 
         with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
@@ -196,36 +271,55 @@ class AlphaSiftOpportunitiesApiTestCase(unittest.TestCase):
             use_llm=False,
         )
         self.assertEqual(payload["candidate_count"], 1)
-        self.assertEqual(payload["candidates"][0]["code"], "600519")
+        self.assertIsNone(payload["candidates"][0]["score"])
+        self.assertIsNone(payload["candidates"][0]["raw"]["score"])
+        self.assertIsNone(payload["candidates"][0]["raw"]["nested"]["pe"])
+        self.assertIsNone(payload["candidates"][0]["raw"]["nested"]["pb"])
 
-    def test_screen_reads_picks_from_screen_result_dataclass(self) -> None:
-        @dataclass
-        class ScreenResult:
-            picks: list
-
+    def test_screen_rejects_unknown_strategy(self) -> None:
         config = self._config(enabled=True)
-        fake_module = SimpleNamespace(
-            screen=MagicMock(
-                return_value=ScreenResult(
-                    picks=[
-                        {
-                            "code": "600519",
-                            "name": "Kweichow Moutai",
-                            "final_score": 91.25,
-                            "ranking_reason": "AlphaSift pick",
-                        }
-                    ]
-                )
-            )
+        fake_module = _make_adapter_module(
+            list_strategies=lambda: [{"id": "dual_low", "title": "双低选股"}],
+            get_status=lambda: {"supported_markets": ["cn"]},
+            screen=MagicMock(return_value=[]),
         )
 
         with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
-            payload = self._screen(config, market="cn", strategy="balanced_alpha", max_results=5)
+            with self.assertRaises(HTTPException) as caught:
+                self._screen(config, market="cn", strategy="not_exist", max_results=5)
 
-        self.assertEqual(payload["candidate_count"], 1)
-        self.assertEqual(payload["candidates"][0]["code"], "600519")
-        self.assertEqual(payload["candidates"][0]["score"], 91.25)
-        self.assertEqual(payload["candidates"][0]["reason"], "AlphaSift pick")
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_invalid_strategy")
+
+    def test_screen_rejects_unsupported_market(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            list_strategies=lambda: [{"id": "dual_low", "title": "双低选股"}],
+            get_status=lambda: {"supported_markets": ["hk", "us"]},
+            screen=MagicMock(return_value=[]),
+        )
+
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            with self.assertRaises(HTTPException) as caught:
+                self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_invalid_market")
+
+    def test_screen_maps_user_input_exception_to_4xx(self) -> None:
+        config = self._config(enabled=True)
+        fake_module = _make_adapter_module(
+            list_strategies=lambda: [{"id": "dual_low", "title": "双低选股"}],
+            get_status=lambda: {"supported_markets": ["cn"]},
+            screen=MagicMock(side_effect=ValueError("unsupported strategy")),
+        )
+
+        with patch("api.v1.endpoints.alphasift._import_alphasift", return_value=fake_module):
+            with self.assertRaises(HTTPException) as caught:
+                self._screen(config, market="cn", strategy="dual_low", max_results=5)
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertEqual(caught.exception.detail["error"], "alphasift_invalid_input")
 
 
 if __name__ == "__main__":

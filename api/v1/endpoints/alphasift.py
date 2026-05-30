@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import subprocess
 import sys
 from dataclasses import asdict, is_dataclass
@@ -17,6 +18,7 @@ from src.config import Config, DEFAULT_ALPHASIFT_INSTALL_SPEC
 
 router = APIRouter()
 
+ALPHASIFT_DSA_ADAPTER_MODULE = "alphasift.dsa_adapter"
 ALLOWED_ALPHASIFT_INSTALL_SPECS = frozenset({DEFAULT_ALPHASIFT_INSTALL_SPEC})
 
 
@@ -26,6 +28,14 @@ class AlphaSiftScreenRequest(BaseModel):
     max_results: int = Field(20, ge=1, le=100)
 
 
+class AlphaSiftStrategyResponse(BaseModel):
+    id: str
+    title: str = ""
+    description: str = ""
+    tag: str = ""
+    market: str = ""
+
+
 @router.get("/status")
 def alphasift_status(config: Config = Depends(get_config_dep)) -> Dict[str, Any]:
     return {
@@ -33,6 +43,12 @@ def alphasift_status(config: Config = Depends(get_config_dep)) -> Dict[str, Any]
         "available": _is_alphasift_available(),
         "install_spec_is_default": _is_default_alphasift_install_spec(config.alphasift_install_spec),
     }
+
+
+@router.get("/strategies")
+def alphasift_strategies(config: Config = Depends(get_config_dep)) -> Dict[str, Any]:
+    _ensure_alphasift_enabled(config)
+    return {"strategies": _list_strategies()}
 
 
 @router.post("/install")
@@ -123,20 +139,26 @@ def alphasift_screen(
 ) -> Dict[str, Any]:
     _ensure_alphasift_enabled(config)
 
-    alphasift = _import_alphasift()
-    screen = getattr(alphasift, "screen", None)
-    if not callable(screen):
-        raise HTTPException(
-            status_code=424,
-            detail={"error": "alphasift_unavailable", "message": "已导入 alphasift，但 alphasift.screen 不可调用。"},
-        )
+    _ensure_supported_market(request.market)
+    _ensure_supported_strategy(request.strategy)
 
-    raw = screen(
-        request.strategy,
-        market=request.market,
-        max_output=request.max_results,
-        use_llm=False,
-    )
+    adapter = _import_alphasift()
+    screen = _get_adapter_callable(adapter, "screen", "alphasift.dsa_adapter.screen 不可调用。")
+    try:
+        raw = screen(
+            request.strategy,
+            market=request.market,
+            max_output=request.max_results,
+            use_llm=False,
+        )
+    except HTTPException as exc:
+        raise
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "alphasift_invalid_input", "message": f"AlphaSift 参数非法：{exc}"},
+        ) from exc
+
     candidates = _normalize_candidates(raw)
     return {
         "enabled": True,
@@ -155,7 +177,7 @@ def _ensure_alphasift_enabled(config: Config) -> None:
 
 def _is_alphasift_available() -> bool:
     try:
-        _import_alphasift()
+        _call_alphasift_status()
         return True
     except HTTPException:
         return False
@@ -163,15 +185,123 @@ def _is_alphasift_available() -> bool:
 
 def _import_alphasift() -> Any:
     try:
-        return importlib.import_module("alphasift")
+        return importlib.import_module(ALPHASIFT_DSA_ADAPTER_MODULE)
     except Exception as exc:
         raise HTTPException(
             status_code=424,
             detail={
                 "error": "alphasift_unavailable",
-                "message": f"AlphaSift 未安装或未挂载到当前 Python 环境，无法导入 alphasift：{exc}",
+                "message": f"AlphaSift 未安装或未挂载到当前 Python 环境，无法导入 {ALPHASIFT_DSA_ADAPTER_MODULE}：{exc}",
             },
         ) from exc
+
+
+def _get_adapter_callable(adapter: Any, name: str, missing_error: str) -> Any:
+    callable_obj = getattr(adapter, name, None)
+    if not callable(callable_obj):
+        raise HTTPException(
+            status_code=424,
+            detail={"error": "alphasift_unavailable", "message": f"已导入 alphasift 适配层，但 {missing_error}"},
+        )
+    return callable_obj
+
+
+def _call_alphasift_status() -> Dict[str, Any]:
+    adapter = _import_alphasift()
+    get_status = _get_adapter_callable(adapter, "get_status", "get_status() 不可调用。")
+    result = _to_plain(get_status())
+    if not isinstance(result, dict):
+        return {}
+    return result
+
+
+def _list_strategies() -> List[Dict[str, Any]]:
+    adapter = _import_alphasift()
+    list_strategies = _get_adapter_callable(adapter, "list_strategies", "list_strategies() 不可调用。")
+    raw = list_strategies()
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=424,
+            detail={"error": "alphasift_invalid_result", "message": "AlphaSift list_strategies 返回非列表。"},
+        )
+
+    normalized: List[Dict[str, Any]] = []
+    for item in raw:
+        strategy = _normalize_strategy(item)
+        if not strategy.get("id"):
+            continue
+        normalized.append(strategy)
+    return normalized
+
+
+def _normalize_strategy(raw: Any) -> Dict[str, Any]:
+    item = _to_plain(raw)
+    if isinstance(item, str):
+        return AlphaSiftStrategyResponse(id=item).dict()
+    if not isinstance(item, dict):
+        return AlphaSiftStrategyResponse(id=str(item)).dict()
+
+    normalized = AlphaSiftStrategyResponse(
+        id=str(
+            item.get("id")
+            or item.get("strategy")
+            or item.get("strategy_id")
+            or item.get("name")
+            or "",
+        ),
+        title=str(item.get("name") or item.get("title") or item.get("id") or ""),
+        description=str(item.get("description") or ""),
+        tag=str(item.get("tag") or item.get("category") or ""),
+        market=str(item.get("market") or item.get("market_id") or ""),
+    )
+    try:
+        return normalized.model_dump()
+    except AttributeError:
+        return normalized.dict()
+
+
+def _ensure_supported_strategy(strategy: str) -> None:
+    strategies = _list_strategies()
+    ids = {item.get("id") for item in strategies if item.get("id")}
+    if strategy not in ids:
+        available = sorted(ids)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "alphasift_invalid_strategy",
+                "message": (
+                    f"策略 {strategy} 不在 AlphaSift 当前可用列表内"
+                    f"（可用策略：{', '.join(available[:50])}{'...' if len(available) > 50 else ''}）。"
+                ),
+            },
+        )
+
+
+def _ensure_supported_market(market: str) -> None:
+    status = _call_alphasift_status()
+    supported_markets = status.get("supported_markets") or status.get("markets") or status.get("market")
+    if not supported_markets:
+        return
+
+    normalized = []
+    if isinstance(supported_markets, str):
+        normalized = [supported_markets]
+    elif isinstance(supported_markets, (list, tuple, set)):
+        normalized = list(supported_markets)
+    else:
+        normalized = []
+
+    if market not in normalized:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "alphasift_invalid_market",
+                "message": (
+                    f"市场 {market} 不在 AlphaSift 适配层支持范围内"
+                    f"（支持市场：{', '.join(map(str, normalized)) or '未知'}）。"
+                ),
+            },
+        )
 
 
 def _normalize_candidates(raw: Any) -> List[Dict[str, Any]]:
@@ -184,11 +314,12 @@ def _normalize_candidates(raw: Any) -> List[Dict[str, Any]]:
                 break
     if not isinstance(items, list):
         return []
-    return [_normalize_candidate(item, index + 1) for index, item in enumerate(items)]
+    return [_normalize_candidate(item, index + 1) for index, item in enumerate(_remove_non_finite_json_values(items))]
 
 
 def _normalize_candidate(raw: Any, rank: int) -> Dict[str, Any]:
     item = _to_plain(raw)
+    item = _remove_non_finite_json_values(item)  # 保障 JSON 可序列化
     if not isinstance(item, dict):
         item = {"code": str(item)}
     score = item.get("score")
@@ -214,6 +345,18 @@ def _to_plain(value: Any) -> Any:
         return value.dict()
     if isinstance(value, list):
         return [_to_plain(item) for item in value]
+    return value
+
+
+def _remove_non_finite_json_values(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_remove_non_finite_json_values(item) for item in value]
+    if isinstance(value, tuple):
+        return [_remove_non_finite_json_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _remove_non_finite_json_values(item) for key, item in value.items()}
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     return value
 
 

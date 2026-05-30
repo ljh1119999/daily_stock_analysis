@@ -1,6 +1,6 @@
 # AlphaSift 选股集成
 
-AlphaSift 以最小方式接入 DSA：默认关闭，开启后 Web 侧显示“选股”页签，并通过后端直接调用本地 Python 包的 `alphasift.screen()`。关闭后左侧导航不显示“选股”页签，直接访问 `/screening` 时仍会显示未开启提示。
+AlphaSift 以最小方式接入 DSA：默认关闭，开启后 Web 侧显示“选股”页签，并通过后端直接调用本地 Python 包的 `alphasift.dsa_adapter`。关闭后左侧导航不显示“选股”页签，直接访问 `/screening` 时仍会显示未开启提示。
 
 ## 开启
 
@@ -32,6 +32,9 @@ python -m pip install -e /path/to/alphasift
 DSA 调用的 AlphaSift 接口固定为：
 
 ```python
+alphasift = importlib.import_module("alphasift.dsa_adapter")
+alphasift.get_status()
+alphasift.list_strategies()
 alphasift.screen(strategy, market=market, max_output=max_results, use_llm=False)
 ```
 
@@ -42,7 +45,7 @@ alphasift.screen(strategy, market=market, max_output=max_results, use_llm=False)
 
 - 状态接口不返回 `install_spec` 明文。
 - 安装接口返回 `installed`/`already_installed`/`install_spec_is_default`，不返回 `install_spec` 明文。
-- `alphasift.screen` 必须使用固定签名 `screen(strategy, market=..., max_output=..., use_llm=False)` 调用。
+- `alphasift.get_status()` 用于可用性判断，`alphasift.list_strategies()` 用于动态策略下发，`alphasift.screen(strategy, market=..., max_output=..., use_llm=False)` 用于候选执行。
 
 当前自动化环境不执行联网安装与运行时真库验收；若需线上复核，请在可访问目标提交的同一 Python 环境手动完成 `pip install` 并访问 `/api/v1/alphasift/screen`，确认上述签名仍可成功执行。
 
@@ -55,8 +58,10 @@ python - <<'PY'
 import importlib
 
 alphasift = importlib.import_module("alphasift.dsa_adapter")
-sig = alphasift.screen
-print(f"adapter callable: {sig}")
+print(
+    f"adapter callable: {hasattr(alphasift, 'get_status')} "
+    f"{hasattr(alphasift, 'list_strategies')} {hasattr(alphasift, 'screen')}"
+)
 PY
 ```
 
@@ -67,6 +72,7 @@ PY
 ```text
 GET  /api/v1/alphasift/status
 POST /api/v1/alphasift/screen
+GET  /api/v1/alphasift/strategies
 ```
 
 请求示例：

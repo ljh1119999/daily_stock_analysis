@@ -2,10 +2,11 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import StockScreeningPage from '../StockScreeningPage';
 
-const { enableAlphaSift, getAlphaSiftStatus, screenStocks } = vi.hoisted(() => ({
+const { enableAlphaSift, getAlphaSiftStatus, screenStocks, getAlphaSiftStrategies } = vi.hoisted(() => ({
   enableAlphaSift: vi.fn(),
   getAlphaSiftStatus: vi.fn(),
   screenStocks: vi.fn(),
+  getAlphaSiftStrategies: vi.fn(),
 }));
 
 vi.mock('../../api/alphasift', () => ({
@@ -13,6 +14,7 @@ vi.mock('../../api/alphasift', () => ({
     enable: (...args: unknown[]) => enableAlphaSift(...args),
     getStatus: (...args: unknown[]) => getAlphaSiftStatus(...args),
     screen: (...args: unknown[]) => screenStocks(...args),
+    getStrategies: (...args: unknown[]) => getAlphaSiftStrategies(...args),
   },
 }));
 
@@ -21,6 +23,7 @@ describe('StockScreeningPage', () => {
     enableAlphaSift.mockReset();
     getAlphaSiftStatus.mockReset();
     screenStocks.mockReset();
+    getAlphaSiftStrategies.mockReset();
   });
 
   it('re-syncs enabled state when AlphaSift install fails after config is enabled', async () => {
@@ -51,6 +54,14 @@ describe('StockScreeningPage', () => {
   });
 
   it('shows input strategy when strategy is not in preset list', async () => {
+    getAlphaSiftStrategies.mockResolvedValueOnce([
+      {
+        id: 'dual_low',
+        title: '双低选股',
+        description: 'value',
+        tag: '价值',
+      },
+    ]);
     getAlphaSiftStatus.mockResolvedValueOnce({
       enabled: true,
       available: false,
@@ -77,6 +88,38 @@ describe('StockScreeningPage', () => {
   });
 
   it('uses supported AlphaSift strategy ids and markets', async () => {
+    getAlphaSiftStrategies.mockResolvedValueOnce([
+      {
+        id: 'balanced_alpha',
+        title: '平衡选股',
+        description: 'desc',
+        tag: '框架',
+      },
+      {
+        id: 'capital_heat',
+        title: '资金热度',
+        description: 'desc',
+        tag: '动量',
+      },
+      {
+        id: 'dual_low',
+        title: '双低',
+        description: 'desc',
+        tag: '价值',
+      },
+      {
+        id: 'oversold_reversal',
+        title: '超跌',
+        description: 'desc',
+        tag: '反转',
+      },
+      {
+        id: 'shrink_pullback',
+        title: '缩量回踩',
+        description: 'desc',
+        tag: '趋势',
+      },
+    ]);
     getAlphaSiftStatus.mockResolvedValueOnce({
       enabled: true,
       available: false,
@@ -96,9 +139,9 @@ describe('StockScreeningPage', () => {
     expect(Array.from(marketSelect.options).map((option) => option.value)).toEqual(['cn']);
 
     [
-      ['均衡多因子', 'balanced_alpha'],
+      ['平衡选股', 'balanced_alpha'],
       ['资金热度', 'capital_heat'],
-      ['超跌反转', 'oversold_reversal'],
+      ['超跌', 'oversold_reversal'],
       ['缩量回踩', 'shrink_pullback'],
     ].forEach(([label, id]) => {
       fireEvent.click(screen.getByRole('button', { name: new RegExp(label) }));

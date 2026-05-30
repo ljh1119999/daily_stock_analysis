@@ -1,59 +1,12 @@
 import type React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, CircleAlert, Play, PlusCircle, Search, SlidersHorizontal } from 'lucide-react';
-import { alphasiftApi, type AlphaSiftCandidate } from '../api/alphasift';
+import {
+  alphasiftApi,
+  type AlphaSiftCandidate,
+  type AlphaSiftStrategy,
+} from '../api/alphasift';
 import { AppPage, Button, InlineAlert } from '../components/common';
-
-const STRATEGIES = [
-  {
-    id: 'balanced_alpha',
-    title: '均衡多因子',
-    description: '综合估值、资金、动量、稳定性的通用候选发现策略',
-    tag: '框架',
-  },
-  {
-    id: 'capital_heat',
-    title: '资金热度',
-    description: '资金活跃、量价同步但未被透支的短线候选',
-    tag: '动量',
-  },
-  {
-    id: 'dual_low',
-    title: '双低选股',
-    description: '偏稳健的低估值筛选策略，适合价值投资者',
-    tag: '价值',
-  },
-  {
-    id: 'trend_quality',
-    title: '趋势质量',
-    description: '兼顾趋势确认和基本面质量的中线候选发现',
-    tag: '框架',
-  },
-  {
-    id: 'oversold_reversal',
-    title: '超跌反转',
-    description: '跌幅可控、流动性仍在、具备修复观察价值的反转候选',
-    tag: '反转',
-  },
-  {
-    id: 'stable_value',
-    title: '稳健价值',
-    description: '估值合理、流动性充足、波动不过热的稳健候选',
-    tag: '价值',
-  },
-  {
-    id: 'shrink_pullback',
-    title: '缩量回踩',
-    description: '上升趋势中缩量回踩支撑，观察趋势延续的入场信号',
-    tag: '趋势',
-  },
-  {
-    id: 'volume_breakout',
-    title: '放量突破',
-    description: '成交量放大突破关键阻力位，趋势启动信号',
-    tag: '趋势',
-  },
-];
 
 const MARKETS = [
   { id: 'cn', label: 'A 股' },
@@ -89,18 +42,60 @@ const StockScreeningPage: React.FC = () => {
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [enabling, setEnabling] = useState(false);
+  const [strategies, setStrategies] = useState<AlphaSiftStrategy[]>([]);
+  const [loadingStrategies, setLoadingStrategies] = useState(false);
   const [error, setError] = useState('');
 
-  const selectedStrategy = useMemo(() => STRATEGIES.find((item) => item.id === strategy), [strategy]);
+  const selectedStrategy = useMemo(
+    () => strategies.find((item) => item.id === strategy),
+    [strategy, strategies],
+  );
   const selectedStrategyTitle = selectedStrategy?.title ?? '自定义策略';
   const selectedStrategyTag = selectedStrategy?.tag ?? '自定义';
   const displayedStrategy = selectedStrategy ? selectedStrategyTitle : `自定义策略（${strategy}）`;
 
   useEffect(() => {
-    alphasiftApi
-      .getStatus()
-      .then((status) => setEnabled(status.enabled))
-      .catch(() => setEnabled(false));
+    let active = true;
+
+    const refresh = async () => {
+      setLoadingStrategies(true);
+      try {
+        const status = await alphasiftApi.getStatus();
+        if (!active) {
+          return;
+        }
+        setEnabled(status.enabled);
+
+        if (!status.enabled) {
+          setStrategies([]);
+          return;
+        }
+
+        const fetchedStrategies = await alphasiftApi.getStrategies();
+        if (!active) {
+          return;
+        }
+        setStrategies(fetchedStrategies);
+        if (!fetchedStrategies.some((item) => item.id === strategy) && fetchedStrategies[0]?.id) {
+          setStrategy(fetchedStrategies[0].id);
+        }
+      } catch {
+        if (active) {
+          setEnabled(false);
+          setStrategies([]);
+        }
+      } finally {
+        if (active) {
+          setLoadingStrategies(false);
+        }
+      }
+    };
+
+    void refresh();
+
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleEnable = async () => {
@@ -109,6 +104,11 @@ const StockScreeningPage: React.FC = () => {
     try {
       await alphasiftApi.enable();
       setEnabled(true);
+      const fetchedStrategies = await alphasiftApi.getStrategies();
+      setStrategies(fetchedStrategies);
+      if (!fetchedStrategies.some((item) => item.id === strategy) && fetchedStrategies[0]?.id) {
+        setStrategy(fetchedStrategies[0].id);
+      }
     } catch (err) {
       try {
         const status = await alphasiftApi.getStatus();
@@ -145,7 +145,7 @@ const StockScreeningPage: React.FC = () => {
           </span>
           <div>
             <h1 className="text-2xl font-bold tracking-normal text-foreground">AlphaSift 选股</h1>
-            <p className="mt-1 text-sm text-secondary-text">开启后调用本地 alphasift.screen() 生成候选股票</p>
+            <p className="mt-1 text-sm text-secondary-text">开启后调用本地 alphasift.dsa_adapter 执行选股</p>
           </div>
         </div>
 
@@ -180,7 +180,9 @@ const StockScreeningPage: React.FC = () => {
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold text-foreground">选择策略</h2>
-            <p className="mt-1 text-xs text-secondary-text">策略会作为参数直接传给 AlphaSift，可按需切换或手动输入。</p>
+            <p className="mt-1 text-xs text-secondary-text">
+              策略会从 /alphasift/strategies 动态读取，可按需切换或手动输入。
+            </p>
           </div>
           <span className="rounded-full border border-cyan/30 bg-cyan/10 px-3 py-1 text-xs font-semibold text-cyan">
             {selectedStrategyTag}
@@ -188,25 +190,37 @@ const StockScreeningPage: React.FC = () => {
         </div>
 
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-          {STRATEGIES.map((item) => {
-            const selected = item.id === strategy;
-            return (
-              <button
-                key={item.id}
-                className={`min-h-28 rounded-xl border p-4 text-left transition-all ${
-                  selected
-                    ? 'border-cyan bg-cyan/10 shadow-[0_0_0_1px_hsl(var(--primary)/0.15),0_16px_36px_hsl(var(--primary)/0.12)]'
-                    : 'border-border/80 bg-surface/70 hover:border-cyan/45 hover:bg-hover/70'
-                }`}
-                type="button"
-                onClick={() => setStrategy(item.id)}
-              >
-                <span className="text-base font-semibold text-foreground">{item.title}</span>
-                <span className="mt-2 block text-sm leading-6 text-secondary-text">{item.description}</span>
-                <span className="mt-3 inline-flex text-xs font-semibold text-cyan">{item.tag}</span>
-              </button>
-            );
-          })}
+          {loadingStrategies ? (
+            <div className="rounded-lg border border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              正在读取可用策略...
+            </div>
+          ) : strategies.length === 0 ? (
+            <div className="rounded-lg border border-border bg-surface/70 p-4 text-sm text-secondary-text">
+              未获取到策略列表，请使用自定义策略参数。
+            </div>
+          ) : (
+            strategies.map((item) => {
+              const selected = item.id === strategy;
+              return (
+                <button
+                  key={item.id}
+                  className={`min-h-28 rounded-xl border p-4 text-left transition-all ${
+                    selected
+                      ? 'border-cyan bg-cyan/10 shadow-[0_0_0_1px_hsl(var(--primary)/0.15),0_16px_36px_hsl(var(--primary)/0.12)]'
+                      : 'border-border/80 bg-surface/70 hover:border-cyan/45 hover:bg-hover/70'
+                  }`}
+                  type="button"
+                  onClick={() => setStrategy(item.id)}
+                >
+                  <span className="text-base font-semibold text-foreground">{item.title || item.id}</span>
+                  <span className="mt-2 block text-sm leading-6 text-secondary-text">
+                    {item.description || '暂无策略说明'}
+                  </span>
+                  <span className="mt-3 inline-flex text-xs font-semibold text-cyan">{item.tag || '自定义'}</span>
+                </button>
+              );
+            })
+          )}
         </div>
       </section>
 

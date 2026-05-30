@@ -53,6 +53,35 @@ describe('alphasiftApi', () => {
     expect(updateConfig.mock.invocationCallOrder[0]).toBeLessThan(post.mock.invocationCallOrder[0]);
   });
 
+  it('loads dynamic strategies from API', async () => {
+    get.mockResolvedValueOnce({
+      data: {
+        strategies: [
+          {
+            id: 'dual_low',
+            title: '双低选股',
+            description: 'value',
+            tag: '价值',
+            market: 'cn',
+          },
+        ],
+      },
+    });
+
+    const strategies = await alphasiftApi.getStrategies();
+
+    expect(strategies).toEqual([
+      {
+        id: 'dual_low',
+        title: '双低选股',
+        description: 'value',
+        tag: '价值',
+        market: 'cn',
+      },
+    ]);
+    expect(get).toHaveBeenCalledWith('/api/v1/alphasift/strategies');
+  });
+
   it('keeps enable ordering when called without object binding', async () => {
     getConfig.mockResolvedValueOnce({ configVersion: 'v1', maskToken: '******' });
     updateConfig.mockResolvedValueOnce({ success: true });

@@ -29,6 +29,18 @@ export type AlphaSiftScreenResponse = {
   candidateCount: number;
 };
 
+export type AlphaSiftStrategy = {
+  id: string;
+  title: string;
+  description: string;
+  tag: string;
+  market: string;
+};
+
+export type AlphaSiftStrategiesResponse = {
+  strategies: AlphaSiftStrategy[];
+};
+
 export function notifyAlphaSiftConfigChanged(): void {
   window.dispatchEvent(new Event('alphasift-config-changed'));
 }
@@ -51,6 +63,11 @@ export const alphasiftApi = {
   async install(): Promise<AlphaSiftInstallResponse> {
     const response = await apiClient.post<Record<string, unknown>>('/api/v1/alphasift/install', {}, { timeout: 180000 });
     return toCamelCase<AlphaSiftInstallResponse>(response.data);
+  },
+
+  async getStrategies(): Promise<AlphaSiftStrategy[]> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/alphasift/strategies');
+    return toCamelCase<AlphaSiftStrategiesResponse>(response.data).strategies ?? [];
   },
 
   async enable(): Promise<void> {
