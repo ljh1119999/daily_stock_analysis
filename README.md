@@ -2,7 +2,7 @@
 
 # 📈 A股智能分析 · 个人实战定制版
 
-[![GitHub stars](https://img.shields.io/github/stars/ljh1119999/daily_stock_analysis?style=social)](https://github.com/ljh1119999/daily_stock_analysis/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/ljh1119999/ben-stock-prediction?style=social)](https://github.com/ljh1119999/ben-stock-prediction/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/zhulinsen/daily_stock_analysis)
@@ -58,7 +58,7 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/ljh1119999/daily_stock_analysis.git && cd daily_stock_analysis
+git clone https://github.com/ljh1119999/ben-stock-prediction.git && cd ben-stock-prediction
 
 # 安装依赖
 pip install -r requirements.txt
